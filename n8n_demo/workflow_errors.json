@@ -1,0 +1,87 @@
+{
+  "id": "invoice-approval-error-alert",
+  "name": "Invoice approval \u2014 error alert",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The Error Trigger gives us the failed execution and the workflow it belonged to.\n// Keep the alert short enough to read on a phone.\nconst j = $input.first().json || {};\nconst execution = j.execution || {};\nconst workflow = j.workflow || {};\nconst error = execution.error || {};\n\nconst workflowName = String(workflow.name || execution.workflowId || 'unknown workflow');\nconst node = String(execution.lastNodeExecuted || 'unknown node');\nconst message = String(error.message || error.description || 'no message');\nconst stack = String(error.stack || '').split('\\n').slice(0, 6).join('\\n');\nconst executionId = String(execution.id || '');\nconst mode = String(execution.mode || '');\n\nreturn [{\n  json: {\n    subject: 'n8n failure: ' + workflowName + ' \u2014 ' + node,\n    body: [\n      'A workflow failed and needs a look.',\n      '',\n      'Workflow:  ' + workflowName,\n      'Node:      ' + node,\n      'Mode:      ' + mode,\n      'Execution: ' + executionId,\n      'Link:      http://localhost:5678/workflow/' + String(workflow.id || '') + '/executions/' + executionId,\n      '',\n      'Error: ' + message,\n      '',\n      stack ? 'Stack (first lines):\\n' + stack : '',\n      '',\n      'Nothing was lost: the invoice workflow keeps its own record and the reply',\n      'handler retries unprocessed replies on the next poll.',\n    ].join('\\n'),\n  },\n}];"
+      },
+      "id": "format-failure",
+      "name": "Format Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "owner@example.com",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "email-alert",
+      "name": "Email: Failure Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        0
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "sUk27B0Jfh99nfgy",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Failure": {
+      "main": [
+        [
+          {
+            "node": "Email: Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

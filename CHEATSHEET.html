@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#12100e">
+<title>Shotty — what it is and how to run it</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0 auto;max-width:760px;padding:28px 20px 80px;background:#12100e;color:#e8e4df;
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+h1{font-size:26px;line-height:1.2;margin:0 0 6px;font-weight:600}
+h2{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:#c9a961;font-weight:700;
+  margin:36px 0 10px;padding-bottom:8px;border-bottom:1px solid #2e2a27}
+h3{font-size:15px;margin:22px 0 6px;color:#e8e4df}
+p{margin:0 0 12px;color:#cfc9c2}
+.lead{color:#a09890;font-size:15px;margin-bottom:22px}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+code{background:#1c1917;border:1px solid #2e2a27;border-radius:4px;padding:1px 6px;font-size:13.5px;color:#e8e4df}
+pre{background:#1c1917;border:1px solid #2e2a27;border-radius:10px;padding:14px 16px;overflow-x:auto;
+  font-size:13.5px;line-height:1.65;margin:10px 0 16px;color:#e8e4df}
+.card{background:#1c1917;border:1px solid #2e2a27;border-radius:12px;padding:16px 18px;margin:16px 0}
+.card h3{margin-top:0}
+.big{border-left:3px solid #c9a961}
+.warn{border-left:3px solid #b5564a}
+.ok{border-left:3px solid #7d9d6a}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14.5px}
+th,td{text-align:left;padding:9px 10px 9px 0;border-bottom:1px solid #2e2a27;vertical-align:top}
+th{color:#a09890;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.muted{color:#a09890;font-size:14px}
+ul{margin:8px 0 14px;padding-left:20px;color:#cfc9c2}
+li{margin:5px 0}
+.k{color:#c9a961;font-weight:600}
+</style></head>
+<body>
+
+<h1>Shotty</h1>
+<p class="lead">A page on your phone that answers from your own notes — and can make one gated change. Not DSH. Not Mark.</p>
+
+<h2>What it actually is</h2>
+<div class="card big">
+<p><strong>You type something on your phone.</strong> The page sends it to a small program running on
+your Mac. That program looks through the notes in <code>~/Workspace/MARK</code>, then asks a small AI
+model <em>on the Mac</em> (<code>qwen2.5:7b</code>, via Ollama) to answer using only what it found.</p>
+<p>It has three tools: count the rows in its local rows sheet, total a numeric field, and append a
+row. The model chooses the tool itself. The append is a <strong>write</strong>: it never runs when
+requested — it waits for you to tap <strong>Approve</strong> on the page.</p>
+<p>Nothing is sent to the internet. There is no cloud, no API key, no account.</p>
+<p class="muted">It cites the file and line it used. If the notes don't contain the answer, it says so.</p>
+</div>
+
+<div class="card warn">
+<h3>What it is not</h3>
+<ul>
+<li>It is <strong>not</strong> DSH — the assistant you talk to at <code>127.0.0.1:3080</code>. That one edits files and runs commands. This one reads notes and can append a row, with your approval.</li>
+<li>It cannot change anything without you. A write opens an approval card; nothing is written until you tap Approve, and it executes exactly once. A second tap is a no-op.</li>
+<li>It does not move Mark anywhere. It reads the MARK folder where it already is.</li>
+</ul>
+</div>
+
+<h2>Where do I type what?</h2>
+<table>
+<tr><th>Thing</th><th>Where</th><th>What for</th></tr>
+<tr><td><span class="k">“Ask it something” box</span></td><td>On the phone page</td><td>Questions only. Plain English.</td></tr>
+<tr><td><span class="k">Terminal</span></td><td><code>Terminal.app</code> on the Mac</td><td>Every command below. Not the phone.</td></tr>
+</table>
+<p class="muted">A command is a line you paste into Terminal and press Return. The “Ask it something”
+field will never run a command.</p>
+
+<h2>Approvals — the one place it can change something</h2>
+<div class="card big">
+<p>Ask it to append a row and the reply will say it needs your approval. Above the reply you get a
+card with the tool name, the exact row it wants to write, and two buttons:</p>
+<ul>
+<li><strong>Approve</strong> — executes the write, once. The card says <em>“Approved — executed exactly once.”</em></li>
+<li><strong>Reject</strong> — records the refusal and writes nothing. <em>“Rejected — nothing was executed.”</em></li>
+<li><strong>Other actions</strong> (e.g. <strong>Replace</strong> / <strong>Drop</strong> for research, <strong>Accept</strong> / <strong>Dispute</strong> for reconciliation) — the card shows the buttons that workflow defines, and the decision is sent back to the workflow. <em>“Replace — recorded and sent to the workflow.”</em></li>
+</ul>
+<p class="muted">Both decisions are appended to <code>state/approvals.jsonl</code>. If the page is
+reloaded — or left open, it checks every 10 seconds — pending approvals are fetched and shown, with the count in the title. Tapping Approve twice (or
+reopening the link) cannot write twice — the id is bound to the run id and a hash of the payload.</p>
+</div>
+
+<h2>The four commands you actually need</h2>
+
+<h3>1 · Start it (and keep it running forever)</h3>
+<pre>cd ~/Workspace/MARK/Projects/Job_Search/bridge
+./install-service.sh</pre>
+<p>One time only. After this it starts by itself at login, restarts if it crashes, and closing
+Terminal does nothing. On a laptop the Mac must be awake for the phone to reach it.</p>
+
+<h3>2 · Give it a name</h3>
+<pre>cd ~/Workspace/MARK/Projects/Job_Search/bridge
+echo Shotty &gt; state/name
+./install-service.sh</pre>
+<p>Replace <code>Shotty</code> with whatever you want. That is the name it uses for itself.</p>
+
+<h3>3 · Get the link for the phone</h3>
+<pre>cd ~/Workspace/MARK/Projects/Job_Search/bridge
+./phone.sh</pre>
+<p>Prints the address and the token, copies the link to your clipboard, and draws a QR code you can
+scan with the phone camera. The address and token are <strong>stable now</strong> — once you add it
+to the Home Screen it keeps working.</p>
+
+<h3>4 · Stop it</h3>
+<pre>cd ~/Workspace/MARK/Projects/Job_Search/bridge
+./uninstall-service.sh</pre>
+<p>Stops it and removes the auto-start. Your notes and settings are untouched.</p>
+
+<h2>If something looks broken</h2>
+<table>
+<tr><th>What you see</th><th>What it means</th><th>Fix</th></tr>
+<tr>
+  <td><code>{"ok":false,"error":"missing or bad token"}</code></td>
+  <td>The link has no token, or the server is older than the page.</td>
+  <td>Open the short address and paste the token, or run <code>./phone.sh</code> again.</td>
+</tr>
+<tr>
+  <td>Safari can’t connect, or the page says <code>Request failed: Load failed</code></td>
+  <td>Mac asleep, on a different Wi-Fi, or this Home Screen link points at an old address.</td>
+  <td>Wake the Mac. If the page shows a red banner, open the tailnet address instead: <code>http://&lt;tailnet-ip&gt;:8787</code> with the token, then Add to Home Screen again.</td>
+</tr>
+<tr>
+  <td>An approval card is waiting</td>
+  <td>The model asked to append a row. Nothing has been written yet.</td>
+  <td>Tap <strong>Approve</strong> to execute it once, or <strong>Reject</strong> to refuse. Both are logged.</td>
+</tr>
+<tr>
+  <td>“The notes do not cover it.”</td>
+  <td>It searched and found nothing relevant. That is the honest answer, not a failure.</td>
+  <td>Ask more specifically, or add the fact to the notes.</td>
+</tr>
+<tr>
+  <td>A command says “Missing script: phone”</td>
+  <td>You are not in the bridge folder.</td>
+  <td>Start with the <code>cd</code> line shown above. Always.</td>
+</tr>
+</table>
+
+<h3>Watch the log</h3>
+<pre>tail -f /tmp/local-agent.log</pre>
+<p class="muted">Ctrl-C to stop watching. This is what went wrong, if anything did.</p>
+
+<h2>What it can and cannot answer</h2>
+<div class="card ok">
+<p><strong>Good at:</strong> one-hop lookups. “Did we apply to the aged care job?”, “What is the next
+action on the local agent?”, “Why did we skip the ad-intelligence job?” It can also walk its own
+tools in sequence — count the rows, total the amount, then report both.</p>
+<p><strong>Weaker at:</strong> questions that need several documents joined together, or anything not
+written down in <code>~/Workspace</code>. The 7b model occasionally answers a tool request in prose
+instead of calling the tool; if that happens, ask again with “call the tool”.</p>
+</div>
+
+<h2>Under the hood, in one paragraph</h2>
+<p class="muted">A Node server (<code>server.js</code>) serves the page and answers
+<code>POST /task</code>. Before answering it searches a local index of about 900 chunks from 39
+markdown files (<code>context.js</code>) and puts the best few in the prompt, with instructions to
+refuse when they don’t contain the answer. The model is Ollama on <code>localhost:11434</code>. It is
+handed the tool list (the same definitions are served over MCP by <code>mcp_server.js</code>); if it
+calls a read, the result goes back into the loop until it answers. A write opens an approval instead.
+At 18:00 local a deterministic end-of-day summary is written from the logs. Everything is stored
+under <code>bridge/state/</code>: token, name, run log, approvals, conversation memory, summaries.</p>
+
+<p class="muted" style="margin-top:40px">This page lives at
+<code>~/Workspace/MARK/Projects/Job_Search/bridge/CHEATSHEET.html</code>. Open it in any browser,
+or on the phone at <code>/help</code>.</p>
+
+</body></html>

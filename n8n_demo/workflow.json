@@ -1,0 +1,844 @@
+{
+  "id": "vendor-invoice-approval-gate",
+  "name": "Vendor invoice approval gate (AI agent + exception queue)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Vendor invoice intake",
+        "formDescription": "Paste an invoice line. The agent extracts the fields, checks the approved-supplier record and either files it or sends it to a person.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Vendor",
+              "fieldName": "vendor",
+              "fieldType": "text",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Amount",
+              "fieldName": "amount",
+              "fieldType": "number",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Notes",
+              "fieldName": "notes",
+              "fieldType": "textarea",
+              "requiredField": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "form-trigger",
+      "name": "Invoice Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -900,
+        -300
+      ],
+      "webhookId": "344c72ea-7e4e-5ce0-842b-24660b73d16f"
+    },
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Run with sample invoice",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// One fixed invoice so the workflow can be executed and demonstrated headlessly.\n// If this node was started with data (n8n's manual-run \"trigger data\"), that data\n// is used instead - that is the seam the test harness uses.\nconst injected = $input.first().json;\nconst sample = Object.keys(injected).length\n  ? injected\n  : {\n      source: 'manual-demo',\n      vendor: 'Northline Electrical Supply',\n      amount: '1840.00',\n      currency: 'CAD',\n      invoice_ref: 'INV-2291',\n      notes: 'Panel breakers for Trailer 14 rework. Quoted last month at 1,650.',\n    };\nreturn [{ json: sample }];"
+      },
+      "id": "sample-invoice",
+      "name": "Load Sample Invoice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// GENERATED from bridge/engine.js — do not edit by hand. Regenerate: node scripts/build-n8n-code.js\n// ---------------------------------------------------------------- normalise intake\n\nconst pick = (input, keys) => {\n  for (const key of keys) {\n    if (input[key] !== undefined && input[key] !== null && input[key] !== '') return input[key];\n  }\n  return undefined;\n};\n\n/** Port of the `Normalise Intake` node. Returns the normalised invoice and what was missing. */\nfunction normaliseInvoice(input = {}) {\n  const source = input && typeof input === 'object' ? input : {};\n  const inner = source.invoice && typeof source.invoice === 'object' ? { ...source.invoice, ...source } : source;\n\n  const vendor = String(pick(inner, ['vendor', 'Vendor', 'supplier']) ?? '').trim();\n  const amountRaw = String(pick(inner, ['amount', 'Amount', 'total']) ?? '').replace(/[^0-9.\\-]/g, '');\n  const amount = amountRaw === '' ? NaN : Number(amountRaw);\n  const currency = String(pick(inner, ['currency', 'Currency']) ?? 'CAD').toUpperCase();\n  const invoiceRef = String(pick(inner, ['invoice_ref', 'Invoice Reference', 'reference']) ?? '').trim();\n  const notes = String(pick(inner, ['notes', 'Notes', 'description']) ?? '').trim();\n\n  const problems = [];\n  if (!vendor) problems.push('vendor missing');\n  if (!Number.isFinite(amount) || amount <= 0) problems.push('amount missing or not a number');\n\n  return {\n    vendor,\n    amount: Number.isFinite(amount) ? amount : 0,\n    currency,\n    invoice_ref: invoiceRef,\n    notes,\n    problems,\n  };\n}\n\n// ---------------------------------------------------------------- vendor policy\n\nconst norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();\nconst STOP = new Set(['supply', 'supplies', 'supplier', 'company', 'ltd', 'inc', 'the', 'and', 'industrial']);\nconst words = (s) => norm(s).split(' ').filter((w) => w.length > 3 && !STOP.has(w));\n\n/** Map a Vendors sheet row to the policy shape, tolerating the shipped column names. */\nfunction normalisePolicyRow(row = {}) {\n  return {\n    vendor: row.vendor ?? row.Vendor ?? '',\n    category: row.category ?? row.Category ?? 'uncategorised',\n    approved_limit: Number(row.approved_limit ?? row['Approved Limit'] ?? row.limit),\n    active: row.account_active ?? row['Account Active'] ?? row.active,\n  };\n}\n\n/** Port of the `Lookup Vendor Policy` node: loose matching, never a hardcoded supplier. */\nfunction matchVendorPolicy(invoice, policies = []) {\n  const rows = (policies || []).map(normalisePolicyRow);\n  const askedNorm = norm(invoice?.vendor);\n  const hit = askedNorm\n    ? rows.find((p) => {\n      const pn = norm(p.vendor);\n      if (!pn) return false;\n      if (askedNorm.includes(pn) || pn.includes(askedNorm)) return true;\n      const pw = words(p.vendor);\n      return pw.length > 0 && pw.every((w) => askedNorm.includes(w));\n    })\n    : undefined;\n\n  return hit\n    ? {\n      policy_found: true,\n      matched_vendor: hit.vendor,\n      category: hit.category,\n      approved_limit: hit.approved_limit,\n      account_active: hit.active === true || hit.active === 'TRUE' || hit.active === 1,\n    }\n    : {\n      policy_found: false,\n      matched_vendor: null,\n      category: 'unmatched',\n      approved_limit: null,\n      account_active: false,\n    };\n}\n\n// ---------------------------------------------------------------- model output contract\n\n/** Port of the parse attempts in `Parse and Validate`. Returns {parsed, problems}. */\nfunction parseModelJson(text) {\n  const problems = [];\n  let parsed = null;\n  const attempts = [String(text ?? '').trim()];\n  const fenced = String(text ?? '').replace(/```json/gi, '```').split('```').filter((s) => s.includes('{'));\n  attempts.push(...fenced.map((s) => s.trim()));\n  const braces = String(text ?? '').match(/\\{[\\s\\S]*\\}/);\n  if (braces) attempts.push(braces[0]);\n\n  for (const attempt of attempts) {\n    if (!attempt) continue;\n    try {\n      const candidate = JSON.parse(attempt);\n      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {\n        parsed = candidate;\n        break;\n      }\n    } catch {\n      // try the next candidate, exactly as the n8n node does\n    }\n  }\n  if (!parsed) problems.push('agent returned no parseable JSON object');\n  return { parsed, problems, raw: String(text ?? '') };\n}\n\n/**\n * Port of the `Parse and Validate` node. `output` is the model's raw text. Any disagreement\n * between the model's \"approved\" and the deterministic policy record downgrades the result.\n */\nfunction adjudicateInvoice({ output, policy, confidenceFloor = 0.6, intakeId = '' } = {}) {\n  const floor = Number.isFinite(Number(confidenceFloor)) && Number(confidenceFloor) > 0\n    ? Number(confidenceFloor)\n    : 0.6;\n  const { parsed, problems, raw } = parseModelJson(typeof output === 'string' ? output : JSON.stringify(output ?? {}));\n\n  const vendor = String(parsed?.vendor ?? '').trim();\n  const amount = Number(parsed?.amount);\n  const decision = String(parsed?.decision ?? '').toLowerCase();\n  const confidence = Number(parsed?.confidence ?? 0);\n\n  if (parsed) {\n    if (!vendor) problems.push('vendor missing from agent output');\n    if (!Number.isFinite(amount) || amount <= 0) problems.push('amount missing or invalid from agent output');\n    if (!['approved', 'needs_review'].includes(decision)) problems.push('decision is not approved|needs_review');\n    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) problems.push('confidence outside 0-1');\n  }\n\n  if (decision === 'approved') {\n    if (!policy?.policy_found) problems.push('approval rejected: vendor is not on the approved-supplier table');\n    if (policy?.policy_found && !policy.account_active) problems.push('approval rejected: supplier account is inactive');\n    if (policy?.policy_found && Number.isFinite(amount) && amount > policy.approved_limit) {\n      problems.push(`approval rejected: ${amount} exceeds the approved limit of ${policy.approved_limit}`);\n    }\n    if (!Number.isFinite(confidence) || confidence < floor) {\n      problems.push(`approval below the ${floor} confidence floor`);\n    }\n  }\n\n  const finalDecision = decision === 'approved' && problems.length === 0 ? 'approved' : 'needs_review';\n  return {\n    route: finalDecision === 'approved' ? 'auto_approve' : 'needs_review',\n    intake_id: intakeId,\n    vendor: vendor || 'unknown',\n    amount: Number.isFinite(amount) ? amount : 0,\n    currency: String(parsed?.currency ?? 'CAD').toUpperCase(),\n    category: String(parsed?.category ?? policy?.category ?? 'uncategorised'),\n    decision: finalDecision,\n    model_decision: ['approved', 'needs_review'].includes(decision) ? decision : 'invalid',\n    reason: String(parsed?.reason ?? '').trim()\n      || (problems.join('; ') || (finalDecision === 'approved'\n        ? `within the approved limit of ${policy?.approved_limit}`\n        : 'no reason given')),\n    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,\n    policy_found: Boolean(policy?.policy_found),\n    approved_limit: policy?.approved_limit ?? null,\n    validation_problems: problems,\n    agent_raw: raw.slice(0, 1500),\n  };\n}\n\n/**\n * The deterministic check the tools and the approval gate run BEFORE a human is asked.\n * A model cannot even open an approval for an invoice the policy rejects.\n */\nfunction inspectInvoice({ invoice, policies = [], confidenceFloor = 0.6 } = {}) {\n  const normalised = normaliseInvoice(invoice);\n  const policy = matchVendorPolicy(normalised, policies);\n  const reasons = [...normalised.problems];\n\n  if (!policy.policy_found) reasons.push('vendor is not on the approved-supplier table');\n  else {\n    if (!policy.account_active) reasons.push('supplier account is inactive');\n    if (!Number.isFinite(policy.approved_limit)) {\n      // Fail closed: a missing limit used to compare false against NaN and read as \"no limit\".\n      reasons.push('approved limit is missing or not a number');\n    } else if (Number.isFinite(normalised.amount) && normalised.amount > policy.approved_limit) {\n      reasons.push(`${normalised.amount} exceeds the approved limit of ${policy.approved_limit}`);\n    }\n  }\n  const eligible = reasons.length === 0;\n  return {\n    invoice: normalised,\n    policy,\n    eligible,\n    recommendation: eligible ? 'auto_approve' : 'needs_review',\n    reasons,\n    confidence_floor: Number(confidenceFloor),\n  };\n}\n\n// --- n8n wrapper: Normalise Intake ---\nconst input = $input.first().json;\nconst invoice = normaliseInvoice(input);\nreturn [{\n  json: {\n    intake_id: 'INTAKE-' + Date.now().toString(36).toUpperCase(),\n    source: String(input.source ?? 'form'),\n    vendor: invoice.vendor,\n    amount: invoice.amount,\n    currency: invoice.currency,\n    invoice_ref: invoice.invoice_ref,\n    notes: invoice.notes,\n    received_at: new Date().toISOString(),\n    intake_problems: invoice.problems,\n  },\n}];"
+      },
+      "id": "normalise-intake",
+      "name": "Normalise Intake",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        -190
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "read-config",
+      "name": "Read Config",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -240,
+        -380
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Vendors",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "read-vendors",
+      "name": "Read Vendors",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -20,
+        -380
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Merge three things into one item: the invoice, the Config tab (key/value) and\n// the Vendors tab. Read fresh on every run, so changing the approver or a limit\n// in the spreadsheet takes effect on the next invoice - no n8n edit.\nconst configRows = $('Read Config').all().map((i) => i.json).filter((r) => r && r.key);\nconst vendorRows = $('Read Vendors').all().map((i) => i.json).filter((r) => r && r.vendor);\n\nconst config = {};\nfor (const row of configRows) {\n  const key = String(row.key).trim().toLowerCase();\n  if (key) config[key] = row.value === undefined || row.value === null ? '' : String(row.value).trim();\n}\n\nconst vendors = vendorRows\n  .map((r) => ({\n    vendor: String(r.vendor || '').trim(),\n    category: String(r.category || '').trim(),\n    approved_limit: Number(String(r.approved_limit === undefined ? '' : r.approved_limit).replace(/[^0-9.\\-]/g, '')),\n    account_active: ['true', 'yes', '1', 'active'].includes(String(r.account_active).trim().toLowerCase()),\n  }))\n  .filter((v) => v.vendor && Number.isFinite(v.approved_limit));\n\n// Fail loudly rather than silently approving everything: a config error sends an\n// alert email through the error workflow.\nif (!vendors.length) {\n  throw new Error('Config error: the Vendors tab is empty or unreadable. Add rows (vendor, category, approved_limit, account_active).');\n}\nif (!config.approver_email) {\n  throw new Error('Config error: approver_email is missing from the Config tab.');\n}\n\nconst invoice = $('Normalise Intake').first().json;\nif (!invoice.currency) invoice.currency = String(config.currency_default || 'CAD').toUpperCase();\n\nreturn [{ json: { ...invoice, config: { ...config, vendors } } }];"
+      },
+      "id": "attach-config",
+      "name": "Attach Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        -380
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// GENERATED from bridge/engine.js — do not edit by hand. Regenerate: node scripts/build-n8n-code.js\n// ---------------------------------------------------------------- normalise intake\n\nconst pick = (input, keys) => {\n  for (const key of keys) {\n    if (input[key] !== undefined && input[key] !== null && input[key] !== '') return input[key];\n  }\n  return undefined;\n};\n\n/** Port of the `Normalise Intake` node. Returns the normalised invoice and what was missing. */\nfunction normaliseInvoice(input = {}) {\n  const source = input && typeof input === 'object' ? input : {};\n  const inner = source.invoice && typeof source.invoice === 'object' ? { ...source.invoice, ...source } : source;\n\n  const vendor = String(pick(inner, ['vendor', 'Vendor', 'supplier']) ?? '').trim();\n  const amountRaw = String(pick(inner, ['amount', 'Amount', 'total']) ?? '').replace(/[^0-9.\\-]/g, '');\n  const amount = amountRaw === '' ? NaN : Number(amountRaw);\n  const currency = String(pick(inner, ['currency', 'Currency']) ?? 'CAD').toUpperCase();\n  const invoiceRef = String(pick(inner, ['invoice_ref', 'Invoice Reference', 'reference']) ?? '').trim();\n  const notes = String(pick(inner, ['notes', 'Notes', 'description']) ?? '').trim();\n\n  const problems = [];\n  if (!vendor) problems.push('vendor missing');\n  if (!Number.isFinite(amount) || amount <= 0) problems.push('amount missing or not a number');\n\n  return {\n    vendor,\n    amount: Number.isFinite(amount) ? amount : 0,\n    currency,\n    invoice_ref: invoiceRef,\n    notes,\n    problems,\n  };\n}\n\n// ---------------------------------------------------------------- vendor policy\n\nconst norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();\nconst STOP = new Set(['supply', 'supplies', 'supplier', 'company', 'ltd', 'inc', 'the', 'and', 'industrial']);\nconst words = (s) => norm(s).split(' ').filter((w) => w.length > 3 && !STOP.has(w));\n\n/** Map a Vendors sheet row to the policy shape, tolerating the shipped column names. */\nfunction normalisePolicyRow(row = {}) {\n  return {\n    vendor: row.vendor ?? row.Vendor ?? '',\n    category: row.category ?? row.Category ?? 'uncategorised',\n    approved_limit: Number(row.approved_limit ?? row['Approved Limit'] ?? row.limit),\n    active: row.account_active ?? row['Account Active'] ?? row.active,\n  };\n}\n\n/** Port of the `Lookup Vendor Policy` node: loose matching, never a hardcoded supplier. */\nfunction matchVendorPolicy(invoice, policies = []) {\n  const rows = (policies || []).map(normalisePolicyRow);\n  const askedNorm = norm(invoice?.vendor);\n  const hit = askedNorm\n    ? rows.find((p) => {\n      const pn = norm(p.vendor);\n      if (!pn) return false;\n      if (askedNorm.includes(pn) || pn.includes(askedNorm)) return true;\n      const pw = words(p.vendor);\n      return pw.length > 0 && pw.every((w) => askedNorm.includes(w));\n    })\n    : undefined;\n\n  return hit\n    ? {\n      policy_found: true,\n      matched_vendor: hit.vendor,\n      category: hit.category,\n      approved_limit: hit.approved_limit,\n      account_active: hit.active === true || hit.active === 'TRUE' || hit.active === 1,\n    }\n    : {\n      policy_found: false,\n      matched_vendor: null,\n      category: 'unmatched',\n      approved_limit: null,\n      account_active: false,\n    };\n}\n\n// ---------------------------------------------------------------- model output contract\n\n/** Port of the parse attempts in `Parse and Validate`. Returns {parsed, problems}. */\nfunction parseModelJson(text) {\n  const problems = [];\n  let parsed = null;\n  const attempts = [String(text ?? '').trim()];\n  const fenced = String(text ?? '').replace(/```json/gi, '```').split('```').filter((s) => s.includes('{'));\n  attempts.push(...fenced.map((s) => s.trim()));\n  const braces = String(text ?? '').match(/\\{[\\s\\S]*\\}/);\n  if (braces) attempts.push(braces[0]);\n\n  for (const attempt of attempts) {\n    if (!attempt) continue;\n    try {\n      const candidate = JSON.parse(attempt);\n      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {\n        parsed = candidate;\n        break;\n      }\n    } catch {\n      // try the next candidate, exactly as the n8n node does\n    }\n  }\n  if (!parsed) problems.push('agent returned no parseable JSON object');\n  return { parsed, problems, raw: String(text ?? '') };\n}\n\n/**\n * Port of the `Parse and Validate` node. `output` is the model's raw text. Any disagreement\n * between the model's \"approved\" and the deterministic policy record downgrades the result.\n */\nfunction adjudicateInvoice({ output, policy, confidenceFloor = 0.6, intakeId = '' } = {}) {\n  const floor = Number.isFinite(Number(confidenceFloor)) && Number(confidenceFloor) > 0\n    ? Number(confidenceFloor)\n    : 0.6;\n  const { parsed, problems, raw } = parseModelJson(typeof output === 'string' ? output : JSON.stringify(output ?? {}));\n\n  const vendor = String(parsed?.vendor ?? '').trim();\n  const amount = Number(parsed?.amount);\n  const decision = String(parsed?.decision ?? '').toLowerCase();\n  const confidence = Number(parsed?.confidence ?? 0);\n\n  if (parsed) {\n    if (!vendor) problems.push('vendor missing from agent output');\n    if (!Number.isFinite(amount) || amount <= 0) problems.push('amount missing or invalid from agent output');\n    if (!['approved', 'needs_review'].includes(decision)) problems.push('decision is not approved|needs_review');\n    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) problems.push('confidence outside 0-1');\n  }\n\n  if (decision === 'approved') {\n    if (!policy?.policy_found) problems.push('approval rejected: vendor is not on the approved-supplier table');\n    if (policy?.policy_found && !policy.account_active) problems.push('approval rejected: supplier account is inactive');\n    if (policy?.policy_found && Number.isFinite(amount) && amount > policy.approved_limit) {\n      problems.push(`approval rejected: ${amount} exceeds the approved limit of ${policy.approved_limit}`);\n    }\n    if (!Number.isFinite(confidence) || confidence < floor) {\n      problems.push(`approval below the ${floor} confidence floor`);\n    }\n  }\n\n  const finalDecision = decision === 'approved' && problems.length === 0 ? 'approved' : 'needs_review';\n  return {\n    route: finalDecision === 'approved' ? 'auto_approve' : 'needs_review',\n    intake_id: intakeId,\n    vendor: vendor || 'unknown',\n    amount: Number.isFinite(amount) ? amount : 0,\n    currency: String(parsed?.currency ?? 'CAD').toUpperCase(),\n    category: String(parsed?.category ?? policy?.category ?? 'uncategorised'),\n    decision: finalDecision,\n    model_decision: ['approved', 'needs_review'].includes(decision) ? decision : 'invalid',\n    reason: String(parsed?.reason ?? '').trim()\n      || (problems.join('; ') || (finalDecision === 'approved'\n        ? `within the approved limit of ${policy?.approved_limit}`\n        : 'no reason given')),\n    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,\n    policy_found: Boolean(policy?.policy_found),\n    approved_limit: policy?.approved_limit ?? null,\n    validation_problems: problems,\n    agent_raw: raw.slice(0, 1500),\n  };\n}\n\n/**\n * The deterministic check the tools and the approval gate run BEFORE a human is asked.\n * A model cannot even open an approval for an invoice the policy rejects.\n */\nfunction inspectInvoice({ invoice, policies = [], confidenceFloor = 0.6 } = {}) {\n  const normalised = normaliseInvoice(invoice);\n  const policy = matchVendorPolicy(normalised, policies);\n  const reasons = [...normalised.problems];\n\n  if (!policy.policy_found) reasons.push('vendor is not on the approved-supplier table');\n  else {\n    if (!policy.account_active) reasons.push('supplier account is inactive');\n    if (!Number.isFinite(policy.approved_limit)) {\n      // Fail closed: a missing limit used to compare false against NaN and read as \"no limit\".\n      reasons.push('approved limit is missing or not a number');\n    } else if (Number.isFinite(normalised.amount) && normalised.amount > policy.approved_limit) {\n      reasons.push(`${normalised.amount} exceeds the approved limit of ${policy.approved_limit}`);\n    }\n  }\n  const eligible = reasons.length === 0;\n  return {\n    invoice: normalised,\n    policy,\n    eligible,\n    recommendation: eligible ? 'auto_approve' : 'needs_review',\n    reasons,\n    confidence_floor: Number(confidenceFloor),\n  };\n}\n\n// --- n8n wrapper: Lookup Vendor Policy ---\nconst item = $json;\nconst config = item.config && typeof item.config === 'object' ? item.config : {};\nconst policy = matchVendorPolicy(item, config.vendors || []);\nreturn [{ json: { ...item, policy } }];"
+      },
+      "id": "lookup-policy",
+      "name": "Lookup Vendor Policy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        -190
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Invoice: vendor={{ $json.vendor }}; amount={{ $json.amount }} {{ $json.currency }}; reference={{ $json.invoice_ref || 'not stated' }}.\n\nApproved-supplier record from the system of record (policy_found={{ $json.policy.policy_found }}): {{ JSON.stringify($json.policy) }}\n\nApprove only when policy_found is true, account_active is true and the amount is within approved_limit. Otherwise the decision is needs_review and the reason names the rule that failed. Do not invent a limit. Return only the JSON object.",
+        "hasOutputParser": false,
+        "options": {
+          "systemMessage": "You adjudicate supplier invoices against a policy record that is supplied to you. Never invent a vendor, amount, category or limit. Reply with one minified JSON object and nothing else, keys: vendor, amount, currency, category, decision (\"approved\" or \"needs_review\"), reason, confidence (0-1), policy_found (boolean).",
+          "maxIterations": 3
+        }
+      },
+      "id": "ai-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        640,
+        -190
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": "qwen2.5:7b",
+        "options": {
+          "temperature": 0.1,
+          "numPredict": 500
+        }
+      },
+      "id": "ollama-model",
+      "name": "Ollama Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        440,
+        40
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "local-ollama",
+          "name": "Local Ollama (11434)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// GENERATED from bridge/engine.js — do not edit by hand. Regenerate: node scripts/build-n8n-code.js\n// ---------------------------------------------------------------- normalise intake\n\nconst pick = (input, keys) => {\n  for (const key of keys) {\n    if (input[key] !== undefined && input[key] !== null && input[key] !== '') return input[key];\n  }\n  return undefined;\n};\n\n/** Port of the `Normalise Intake` node. Returns the normalised invoice and what was missing. */\nfunction normaliseInvoice(input = {}) {\n  const source = input && typeof input === 'object' ? input : {};\n  const inner = source.invoice && typeof source.invoice === 'object' ? { ...source.invoice, ...source } : source;\n\n  const vendor = String(pick(inner, ['vendor', 'Vendor', 'supplier']) ?? '').trim();\n  const amountRaw = String(pick(inner, ['amount', 'Amount', 'total']) ?? '').replace(/[^0-9.\\-]/g, '');\n  const amount = amountRaw === '' ? NaN : Number(amountRaw);\n  const currency = String(pick(inner, ['currency', 'Currency']) ?? 'CAD').toUpperCase();\n  const invoiceRef = String(pick(inner, ['invoice_ref', 'Invoice Reference', 'reference']) ?? '').trim();\n  const notes = String(pick(inner, ['notes', 'Notes', 'description']) ?? '').trim();\n\n  const problems = [];\n  if (!vendor) problems.push('vendor missing');\n  if (!Number.isFinite(amount) || amount <= 0) problems.push('amount missing or not a number');\n\n  return {\n    vendor,\n    amount: Number.isFinite(amount) ? amount : 0,\n    currency,\n    invoice_ref: invoiceRef,\n    notes,\n    problems,\n  };\n}\n\n// ---------------------------------------------------------------- vendor policy\n\nconst norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();\nconst STOP = new Set(['supply', 'supplies', 'supplier', 'company', 'ltd', 'inc', 'the', 'and', 'industrial']);\nconst words = (s) => norm(s).split(' ').filter((w) => w.length > 3 && !STOP.has(w));\n\n/** Map a Vendors sheet row to the policy shape, tolerating the shipped column names. */\nfunction normalisePolicyRow(row = {}) {\n  return {\n    vendor: row.vendor ?? row.Vendor ?? '',\n    category: row.category ?? row.Category ?? 'uncategorised',\n    approved_limit: Number(row.approved_limit ?? row['Approved Limit'] ?? row.limit),\n    active: row.account_active ?? row['Account Active'] ?? row.active,\n  };\n}\n\n/** Port of the `Lookup Vendor Policy` node: loose matching, never a hardcoded supplier. */\nfunction matchVendorPolicy(invoice, policies = []) {\n  const rows = (policies || []).map(normalisePolicyRow);\n  const askedNorm = norm(invoice?.vendor);\n  const hit = askedNorm\n    ? rows.find((p) => {\n      const pn = norm(p.vendor);\n      if (!pn) return false;\n      if (askedNorm.includes(pn) || pn.includes(askedNorm)) return true;\n      const pw = words(p.vendor);\n      return pw.length > 0 && pw.every((w) => askedNorm.includes(w));\n    })\n    : undefined;\n\n  return hit\n    ? {\n      policy_found: true,\n      matched_vendor: hit.vendor,\n      category: hit.category,\n      approved_limit: hit.approved_limit,\n      account_active: hit.active === true || hit.active === 'TRUE' || hit.active === 1,\n    }\n    : {\n      policy_found: false,\n      matched_vendor: null,\n      category: 'unmatched',\n      approved_limit: null,\n      account_active: false,\n    };\n}\n\n// ---------------------------------------------------------------- model output contract\n\n/** Port of the parse attempts in `Parse and Validate`. Returns {parsed, problems}. */\nfunction parseModelJson(text) {\n  const problems = [];\n  let parsed = null;\n  const attempts = [String(text ?? '').trim()];\n  const fenced = String(text ?? '').replace(/```json/gi, '```').split('```').filter((s) => s.includes('{'));\n  attempts.push(...fenced.map((s) => s.trim()));\n  const braces = String(text ?? '').match(/\\{[\\s\\S]*\\}/);\n  if (braces) attempts.push(braces[0]);\n\n  for (const attempt of attempts) {\n    if (!attempt) continue;\n    try {\n      const candidate = JSON.parse(attempt);\n      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {\n        parsed = candidate;\n        break;\n      }\n    } catch {\n      // try the next candidate, exactly as the n8n node does\n    }\n  }\n  if (!parsed) problems.push('agent returned no parseable JSON object');\n  return { parsed, problems, raw: String(text ?? '') };\n}\n\n/**\n * Port of the `Parse and Validate` node. `output` is the model's raw text. Any disagreement\n * between the model's \"approved\" and the deterministic policy record downgrades the result.\n */\nfunction adjudicateInvoice({ output, policy, confidenceFloor = 0.6, intakeId = '' } = {}) {\n  const floor = Number.isFinite(Number(confidenceFloor)) && Number(confidenceFloor) > 0\n    ? Number(confidenceFloor)\n    : 0.6;\n  const { parsed, problems, raw } = parseModelJson(typeof output === 'string' ? output : JSON.stringify(output ?? {}));\n\n  const vendor = String(parsed?.vendor ?? '').trim();\n  const amount = Number(parsed?.amount);\n  const decision = String(parsed?.decision ?? '').toLowerCase();\n  const confidence = Number(parsed?.confidence ?? 0);\n\n  if (parsed) {\n    if (!vendor) problems.push('vendor missing from agent output');\n    if (!Number.isFinite(amount) || amount <= 0) problems.push('amount missing or invalid from agent output');\n    if (!['approved', 'needs_review'].includes(decision)) problems.push('decision is not approved|needs_review');\n    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) problems.push('confidence outside 0-1');\n  }\n\n  if (decision === 'approved') {\n    if (!policy?.policy_found) problems.push('approval rejected: vendor is not on the approved-supplier table');\n    if (policy?.policy_found && !policy.account_active) problems.push('approval rejected: supplier account is inactive');\n    if (policy?.policy_found && Number.isFinite(amount) && amount > policy.approved_limit) {\n      problems.push(`approval rejected: ${amount} exceeds the approved limit of ${policy.approved_limit}`);\n    }\n    if (!Number.isFinite(confidence) || confidence < floor) {\n      problems.push(`approval below the ${floor} confidence floor`);\n    }\n  }\n\n  const finalDecision = decision === 'approved' && problems.length === 0 ? 'approved' : 'needs_review';\n  return {\n    route: finalDecision === 'approved' ? 'auto_approve' : 'needs_review',\n    intake_id: intakeId,\n    vendor: vendor || 'unknown',\n    amount: Number.isFinite(amount) ? amount : 0,\n    currency: String(parsed?.currency ?? 'CAD').toUpperCase(),\n    category: String(parsed?.category ?? policy?.category ?? 'uncategorised'),\n    decision: finalDecision,\n    model_decision: ['approved', 'needs_review'].includes(decision) ? decision : 'invalid',\n    reason: String(parsed?.reason ?? '').trim()\n      || (problems.join('; ') || (finalDecision === 'approved'\n        ? `within the approved limit of ${policy?.approved_limit}`\n        : 'no reason given')),\n    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,\n    policy_found: Boolean(policy?.policy_found),\n    approved_limit: policy?.approved_limit ?? null,\n    validation_problems: problems,\n    agent_raw: raw.slice(0, 1500),\n  };\n}\n\n/**\n * The deterministic check the tools and the approval gate run BEFORE a human is asked.\n * A model cannot even open an approval for an invoice the policy rejects.\n */\nfunction inspectInvoice({ invoice, policies = [], confidenceFloor = 0.6 } = {}) {\n  const normalised = normaliseInvoice(invoice);\n  const policy = matchVendorPolicy(normalised, policies);\n  const reasons = [...normalised.problems];\n\n  if (!policy.policy_found) reasons.push('vendor is not on the approved-supplier table');\n  else {\n    if (!policy.account_active) reasons.push('supplier account is inactive');\n    if (!Number.isFinite(policy.approved_limit)) {\n      // Fail closed: a missing limit used to compare false against NaN and read as \"no limit\".\n      reasons.push('approved limit is missing or not a number');\n    } else if (Number.isFinite(normalised.amount) && normalised.amount > policy.approved_limit) {\n      reasons.push(`${normalised.amount} exceeds the approved limit of ${policy.approved_limit}`);\n    }\n  }\n  const eligible = reasons.length === 0;\n  return {\n    invoice: normalised,\n    policy,\n    eligible,\n    recommendation: eligible ? 'auto_approve' : 'needs_review',\n    reasons,\n    confidence_floor: Number(confidenceFloor),\n  };\n}\n\n// --- n8n wrapper: Parse and Validate ---\nconst raw = $input.first().json;\nconst upstream = $('Lookup Vendor Policy').first().json;\nconst cfg = ($('Attach Config').first().json || {}).config || {};\nconst result = adjudicateInvoice({\n  output: raw.output,\n  policy: upstream.policy,\n  confidenceFloor: cfg.confidence_floor,\n  intakeId: upstream.intake_id ?? '',\n});\nreturn [{ json: result }];"
+      },
+      "id": "parse-validate",
+      "name": "Parse and Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        -190
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a65cecbf-0059-4f17-9a34-b0886d820f0d",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "auto_approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-auto-approve",
+      "name": "Auto-approve?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1100,
+        -190
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The happy path. An approved invoice becomes one append-only line: what was\n// decided, on what evidence, and by which rule.\nconst item = $input.first().json;\nconst record = {\n  queue: 'auto_approved',\n  filed_at: new Date().toISOString(),\n  intake_id: item.intake_id,\n  vendor: item.vendor,\n  amount: item.amount,\n  currency: item.currency,\n  category: item.category,\n  approved_limit: item.approved_limit,\n  decision: item.decision,\n  model_decision: item.model_decision,\n  reason: item.reason,\n  confidence: item.confidence,\n};\nreturn [{ json: { ...record, line: JSON.stringify(record) + '\\n' } }];"
+      },
+      "id": "ledger-record",
+      "name": "Ledger Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -340
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Approved",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-approved",
+      "name": "Sheet: Approved",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1540,
+        -340
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "line",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "ledger-entry.txt"
+        }
+      },
+      "id": "ledger-file",
+      "name": "Ledger File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        -340
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "out/ledger.jsonl",
+        "dataPropertyName": "data",
+        "options": {
+          "append": true
+        }
+      },
+      "id": "append-ledger",
+      "name": "Append Ledger",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        1980,
+        -340
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The exception queue. A human sees this record; nothing was auto-approved.\nconst item = $input.first().json;\nconst record = {\n  queue: 'needs_review',\n  queued_at: new Date().toISOString(),\n  intake_id: item.intake_id,\n  vendor: item.vendor,\n  amount: item.amount,\n  currency: item.currency,\n  category: item.category,\n  approved_limit: item.approved_limit,\n  policy_found: item.policy_found,\n  model_decision: item.model_decision,\n  reason: item.reason,\n  confidence: item.confidence,\n  validation_problems: item.validation_problems,\n  agent_raw: item.agent_raw,\n};\nreturn [{ json: { ...record, line: JSON.stringify(record) + '\\n' } }];"
+      },
+      "id": "exception-record",
+      "name": "Exception Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Exceptions",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-exceptions",
+      "name": "Sheet: Exceptions",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        680,
+        620
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Attach Config').first().json.config.approver_email }}",
+        "subject": "=Approval needed: {{ $json.vendor }} - {{ $json.amount }} {{ $json.currency }}",
+        "emailType": "text",
+        "message": "=A supplier invoice needs your decision.\n\nVendor:   {{ $json.vendor }}\nAmount:   {{ $json.amount }} {{ $json.currency }}\nCategory: {{ $json.category }}\nLimit:    {{ $json.approved_limit === null ? 'no approved-supplier record' : $json.approved_limit }}\nWhy it is on hold: {{ $json.reason }}\nReference: INTAKE {{ $json.intake_id }}\n\nReply APPROVE to file it, or REJECT to send it back.\nNothing is paid or filed until this reply arrives.\n\n-- SIS Invoice Approval Gate",
+        "options": {}
+      },
+      "id": "gmail-approval-request",
+      "name": "Email: Approval Request",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        -60
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "sUk27B0Jfh99nfgy",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "line",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "exception-entry.txt"
+        }
+      },
+      "id": "exception-file",
+      "name": "Exception File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        680,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "out/exceptions.jsonl",
+        "dataPropertyName": "data",
+        "options": {
+          "append": true
+        }
+      },
+      "id": "append-exception",
+      "name": "Append Exception",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The error branch. This is the part most automations leave invisible: the\n// execution failed, and the failure is written down with the reason.\nconst item = $input.first().json;\nconst message = item.error ?? item.message ?? JSON.stringify(item).slice(0, 800);\nconst record = {\n  queue: 'system_error',\n  failed_at: new Date().toISOString(),\n  workflow: 'vendor-invoice-approval-gate',\n  node: 'AI Agent',\n  error: typeof message === 'string' ? message : JSON.stringify(message),\n};\nreturn [{ json: { ...record, line: JSON.stringify(record) + '\\n' } }];"
+      },
+      "id": "error-record",
+      "name": "Error Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "line",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "error-entry.txt"
+        }
+      },
+      "id": "error-file",
+      "name": "Error File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "out/errors.jsonl",
+        "dataPropertyName": "data",
+        "options": {
+          "append": true
+        }
+      },
+      "id": "append-error",
+      "name": "Append Error",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        1320,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8787/api/approvals",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-bridge-token",
+              "value": "REPLACE_WITH_BRIDGE_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ run_id: $json.intake_id, tool: 'file_invoice_override', payload: { invoice: { vendor: $json.vendor, amount: $json.amount, currency: $json.currency, invoice_ref: $json.invoice_ref }, reason: $json.reason }, callback_url: 'http://127.0.0.1:5678/webhook/shotty-decision', title: $json.vendor + ' — ' + $json.amount + ' ' + $json.currency, fields: [ { label: 'Vendor', value: $json.vendor }, { label: 'Amount', value: $json.amount + ' ' + $json.currency }, { label: 'Approved limit', value: $json.approved_limit === null ? 'no approved-supplier record' : String($json.approved_limit) }, { label: 'Why held', value: $json.reason } ] }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000001",
+      "name": "Ask Shotty (phone approval)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Keep the exception row and add the Shotty approval id, so the decision\n// webhook can be tied back to the right row. This node exists because an\n// HTTP Request node replaces its input with the response.\nconst rec = $('Exception Record').first().json;\nconst res = $input.first().json;\nreturn [{ json: { ...rec, shotty_approval_id: res.id ?? null, shotty_status: res.status ?? 'unknown' } }];"
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000002",
+      "name": "Attach Approval ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        620
+      ]
+    }
+  ],
+  "connections": {
+    "Invoice Form": {
+      "main": [
+        [
+          {
+            "node": "Normalise Intake",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run with sample invoice": {
+      "main": [
+        [
+          {
+            "node": "Load Sample Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Sample Invoice": {
+      "main": [
+        [
+          {
+            "node": "Normalise Intake",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Intake": {
+      "main": [
+        [
+          {
+            "node": "Read Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Config": {
+      "main": [
+        [
+          {
+            "node": "Read Vendors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Vendors": {
+      "main": [
+        [
+          {
+            "node": "Attach Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Config": {
+      "main": [
+        [
+          {
+            "node": "Lookup Vendor Policy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Vendor Policy": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse and Validate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse and Validate": {
+      "main": [
+        [
+          {
+            "node": "Auto-approve?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-approve?": {
+      "main": [
+        [
+          {
+            "node": "Ledger Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Exception Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ledger Record": {
+      "main": [
+        [
+          {
+            "node": "Sheet: Approved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheet: Approved": {
+      "main": [
+        [
+          {
+            "node": "Ledger File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ledger File": {
+      "main": [
+        [
+          {
+            "node": "Append Ledger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exception Record": {
+      "main": [
+        [
+          {
+            "node": "Ask Shotty (phone approval)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheet: Exceptions": {
+      "main": [
+        [
+          {
+            "node": "Email: Approval Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exception File": {
+      "main": [
+        [
+          {
+            "node": "Append Exception",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Record": {
+      "main": [
+        [
+          {
+            "node": "Error File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error File": {
+      "main": [
+        [
+          {
+            "node": "Append Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Shotty (phone approval)": {
+      "main": [
+        [
+          {
+            "node": "Attach Approval ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Approval ID": {
+      "main": [
+        [
+          {
+            "node": "Exception File",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sheet: Exceptions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "demo",
+    "description": "AI agent adjudicates supplier invoices against a deterministic policy record, then either files the invoice or routes it to a human exception queue. Model approval is checked against policy before it is accepted; failures are written to an error queue."
+  },
+  "tags": []
+}

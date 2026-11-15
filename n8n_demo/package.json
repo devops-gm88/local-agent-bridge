@@ -1,0 +1,6 @@
+{
+  "name": "n8n-demo",
+  "private": true,
+  "type": "commonjs",
+  "description": "The n8n invoice demo workflows whose Code nodes are generated from bridge/engine.js. CommonJS because the demo harness predates the bridge module layout."
+}

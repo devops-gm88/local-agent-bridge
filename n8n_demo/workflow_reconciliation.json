@@ -1,0 +1,497 @@
+{
+  "name": "Reconciliation close audit (demo)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Month-end pack",
+        "formDescription": "Upload the period. The audit matches the ledger export against the source export, explains every difference, and sends material items for sign-off.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Period",
+              "fieldName": "period",
+              "fieldType": "text",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Materiality threshold",
+              "fieldName": "materiality",
+              "fieldType": "number",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Source system",
+              "fieldName": "source_label",
+              "fieldType": "text",
+              "requiredField": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "form-trigger",
+      "name": "Month-end Pack",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -900,
+        -200
+      ],
+      "webhookId": "b7e2d4a1-3c5f-5e8a-9d2b-1a4c6e8f0b12"
+    },
+    {
+      "parameters": {},
+      "id": "manual",
+      "name": "Run Demo Batch",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst j=$json||{};\nreturn [{json:{\n  run_id:'RC-'+String(Date.now()).slice(-6),\n  period:j.period||j.Period||'2026-09',\n  materiality:Number(j.materiality||j.Materiality||50),\n  source_label:j.source_label||j['Source system']||'Accounting export vs bank source',\n  started_at:new Date().toISOString().slice(0,19)+'Z',\n  status:'running',\n}}];\n"
+      },
+      "id": "prepare",
+      "name": "Prepare Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -660,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst run=$('Prepare Run').first().json.run_id;\nconst today=new Date(); const d=(offset)=>{const x=new Date(today);x.setDate(x.getDate()-offset);return x.toISOString().slice(0,10);};\nconst amount=(i)=>100+i*10;\nconst counterparty=(i)=>['Northline','Kestrel','Halden','Juniper','Pine'][i%5];\nconst ledger=[]; const source=[];\nfor(let i=1;i<=40;i++){\n  const ref='INV-'+(1000+i);\n  const base={ref,period:'2026-09',date:d(1),currency:'CAD',counterparty:counterparty(i)};\n  const a=amount(i).toFixed(2);\n  if(i!==1012-1000){ /* keep 1012 out of source */ }\n  ledger.push({...base,kind:'ledger',amount:a});\n  if(i!==12) source.push({...base,kind:'source',amount:a,source_date:d(1)});\n}\n// seeded defects\nledger.push({...ledger[4],kind:'ledger',amount:amount(5).toFixed(2)}); // duplicate INV-1005 (row 5)\nsource.find(r=>r.ref==='INV-1018').amount=(amount(18)-12).toFixed(2); // mismatch 12.00\nsource.find(r=>r.ref==='INV-1027').source_date=d(9); // stale sync\nsource.push({kind:'source',ref:'INV-1099',period:'2026-09',date:d(1),currency:'CAD',counterparty:'Onix',amount:'2450.00',source_date:d(1)}); // missing in ledger\nreturn [...ledger,...source].map((r)=>({json:{...r,run_id:run}}));\n"
+      },
+      "id": "fixtures",
+      "name": "Load Fixtures",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -420,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst items=$input.all().map((i)=>i.json);\nconst run=$('Prepare Run').first().json;\nconst TOLERANCE=0.5, STALE_DAYS=3;\nconst ledger=items.filter((r)=>r.kind==='ledger');\nconst source=items.filter((r)=>r.kind==='source');\nconst ledgerBy={}; const dupRefs=new Set();\nfor(const r of ledger){ if(ledgerBy[r.ref]) dupRefs.add(r.ref); ledgerBy[r.ref]=r; }\nconst sourceBy={}; for(const r of source) sourceBy[r.ref]=r;\nconst findings=[]; const add=(type,ref,severity,impact,detail,side)=>findings.push({type,ref,severity,amount_impact:Number(impact||0),detail,side});\nfor(const ref of dupRefs) add('duplicate_ledger',ref,'high',0,'reference appears more than once in the ledger','ledger');\nconst ledgerRefs=Object.keys(ledgerBy); const sourceRefs=Object.keys(sourceBy);\nconst matchedRefs=ledgerRefs.filter((r)=>sourceBy[r]);\nfor(const ref of ledgerRefs){ if(!sourceBy[ref]) add('missing_in_source',ref,'high',Number(ledgerBy[ref].amount),'in ledger, absent from source export','ledger'); }\nfor(const ref of sourceRefs){ if(!ledgerBy[ref]) add('missing_in_ledger',ref,'high',Number(sourceBy[ref].amount),'in source export, absent from ledger','source'); }\nfor(const ref of matchedRefs){\n  const l=ledgerBy[ref], s=sourceBy[ref];\n  const la=Number(l.amount), sa=Number(s.amount);\n  if(Math.abs(la-sa)>TOLERANCE) add('amount_mismatch',ref,'high',Math.abs(la-sa),'ledger '+la.toFixed(2)+' vs source '+sa.toFixed(2),'both');\n  if((la>0&&sa<0)||(la<0&&sa>0)) add('sign_error',ref,'high',Math.abs(la-sa),'sign differs between ledger and source','both');\n  const stale=Math.round((new Date(run.started_at.slice(0,10))-new Date(s.source_date))/864e5);\n  if(!isNaN(stale)&&stale>STALE_DAYS) add('stale_source',ref,'medium',0,'source date '+stale+' days older than the run','source');\n}\nconst variance=findings.reduce((sum,f)=>sum+f.amount_impact,0);\nconst byType=findings.reduce((a,f)=>{a[f.type]=(a[f.type]||0)+1;return a;},{});\nconst summary={\n  run_id:run.run_id, period:run.period, materiality:run.materiality,\n  ledger_rows:ledger.length, source_rows:source.length, matched_refs:matchedRefs.length,\n  findings:findings.length, by_type:JSON.stringify(byType),\n  variance_total:variance.toFixed(2),\n  material_count:findings.filter((f)=>f.amount_impact>=run.materiality).length,\n  started_at:run.started_at, completed_at:new Date().toISOString().slice(0,19)+'Z', status:'complete',\n};\nreturn [{json:{summary,findings}}];\n"
+      },
+      "id": "check",
+      "name": "Match and Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1il8cyUq5aENB_kzyhtm_ZYN8yQNRyv5TmH3sVR-C6Fg",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Runs",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-runs",
+      "name": "Append Run",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        60,
+        -260
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "owner@example.com",
+        "subject": "=Reconciliation report: {{ $json.period }} — {{ $json.findings }} discrepancies",
+        "emailType": "text",
+        "message": "=Month-end reconciliation finished.\n\nPeriod: {{ $json.period }}\nLedger rows: {{ $json.ledger_rows }}\nSource rows: {{ $json.source_rows }}\nMatched references: {{ $json.matched_refs }}\nFindings: {{ $json.findings }}\nVariance explained: {{ $json.variance_total }} CAD\nMaterial items for sign-off: {{ $json.material_count }}\n\nBy type: {{ $json.by_type }}\n\nNothing is marked as reconciled until a person signs off the material items.\n\n-- SIS Reconciliation Audit",
+        "options": {}
+      },
+      "id": "gmail-summary",
+      "name": "Email: Summary",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        520,
+        -260
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "sUk27B0Jfh99nfgy",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst s=$json.summary;\nreturn [{json:s}];\n"
+      },
+      "id": "flatten",
+      "name": "Flatten Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst payload=$json;\nreturn (payload.findings||[]).map((f)=>({json:{run_id:payload.summary.run_id,...f,by_type:undefined}}));\n"
+      },
+      "id": "split",
+      "name": "Split Findings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1il8cyUq5aENB_kzyhtm_ZYN8yQNRyv5TmH3sVR-C6Fg",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Discrepancies",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-disc",
+      "name": "Append Discrepancies",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        300,
+        -40
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pending sign-off row per material discrepancy, carrying the phone approval id.\nconst run = $('Match and Check').first().json.summary;\nreturn $input.all().filter((i) => i.json.amount_impact >= run.materiality).map((i) => ({\n  json: {\n    run_id: i.json.run_id,\n    ref: i.json.ref,\n    discrepancy: i.json.type,\n    decision: 'pending',\n    approver: '',\n    decided_at: '',\n    note: 'waiting for sign-off',\n    shotty_approval_id: i.json.shotty_approval_id || '',\n  },\n}));"
+      },
+      "id": "pending",
+      "name": "Pending Signoffs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        300,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1il8cyUq5aENB_kzyhtm_ZYN8yQNRyv5TmH3sVR-C6Fg",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Signoffs",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-sign",
+      "name": "Append Signoffs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        540,
+        140
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Only discrepancies above materiality need a human sign-off; ask the phone for those.\nconst materiality = Number($('Match and Check').first().json.summary.materiality);\nreturn $input.all().filter((i) => Number(i.json.amount_impact) >= materiality);"
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000034",
+      "name": "Only Material",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        300,
+        760
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8787/api/approvals",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-bridge-token",
+              "value": "REPLACE_WITH_BRIDGE_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ run_id: 'recon:' + $json.run_id + ':' + $json.ref, execute: false, title: 'Discrepancy ' + $json.ref + ' — ' + $json.type, actions: [ { id: 'accept', label: 'Accept' }, { id: 'dispute', label: 'Dispute' } ], fields: [ { label: 'Ref', value: $json.ref }, { label: 'Type', value: $json.type }, { label: 'Amount impact', value: $json.amount_impact }, { label: 'Run', value: $json.run_id } ], payload: { run_id: $json.run_id, ref: $json.ref, type: $json.type, amount_impact: $json.amount_impact }, callback_url: 'http://127.0.0.1:5678/webhook/shotty-reconciliation-decision' }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000035",
+      "name": "Ask Shotty (reconciliation)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        760
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Keep the discrepancy and attach the Shotty approval id.\nconst rows = $('Only Material').all();\nconst responses = $input.all();\nreturn rows.map((row, i) => ({\n  json: {\n    ...row.json,\n    shotty_approval_id: responses[i] && responses[i].json ? responses[i].json.id : null,\n    shotty_status: responses[i] && responses[i].json ? responses[i].json.status : 'unknown',\n  },\n}));"
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000036",
+      "name": "Attach Reconciliation Approval",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        740,
+        760
+      ]
+    }
+  ],
+  "connections": {
+    "Month-end Pack": {
+      "main": [
+        [
+          {
+            "node": "Prepare Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Demo Batch": {
+      "main": [
+        [
+          {
+            "node": "Prepare Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Run": {
+      "main": [
+        [
+          {
+            "node": "Load Fixtures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Fixtures": {
+      "main": [
+        [
+          {
+            "node": "Match and Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match and Check": {
+      "main": [
+        [
+          {
+            "node": "Flatten Summary",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten Summary": {
+      "main": [
+        [
+          {
+            "node": "Append Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Run": {
+      "main": [
+        [
+          {
+            "node": "Email: Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Findings": {
+      "main": [
+        [
+          {
+            "node": "Append Discrepancies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Discrepancies": {
+      "main": [
+        [
+          {
+            "node": "Only Material",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Signoffs": {
+      "main": [
+        [
+          {
+            "node": "Append Signoffs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Material": {
+      "main": [
+        [
+          {
+            "node": "Ask Shotty (reconciliation)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Shotty (reconciliation)": {
+      "main": [
+        [
+          {
+            "node": "Attach Reconciliation Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Reconciliation Approval": {
+      "main": [
+        [
+          {
+            "node": "Pending Signoffs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "dGPcBSOIMb7x9Vnm"
+  },
+  "id": "uFUFNSljvxnQ1xXC"
+}

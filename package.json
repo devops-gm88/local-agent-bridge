@@ -1,0 +1,24 @@
+{
+  "name": "local-agent-bridge",
+  "version": "0.10.0",
+  "private": false,
+  "type": "module",
+  "description": "Shotty \u2014 local agent on the owner's phone: local Ollama model, grounded answers, MCP tools, approval gate, end-of-day summary (I1-I6 + I4b)",
+  "scripts": {
+    "test": "node --test",
+    "demo": "node demo_live.js",
+    "serve": "node server.js",
+    "serve:lan": "HOST=$(ipconfig getifaddr en0 || echo 127.0.0.1) node server.js",
+    "token": "openssl rand -hex 16",
+    "phone": "bash ./phone.sh",
+    "mcp": "node mcp_server.js",
+    "n8n:build": "node scripts/build-n8n-code.js",
+    "n8n:check": "node scripts/build-n8n-code.js --check",
+    "n8n:deploy": "node scripts/deploy-n8n.js"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/devops-gm88/local-agent-bridge"
+  }
+}

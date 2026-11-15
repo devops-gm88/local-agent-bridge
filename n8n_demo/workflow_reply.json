@@ -1,0 +1,991 @@
+{
+  "id": "invoice-approval-reply-handler",
+  "name": "Invoice approval — reply handler (APPROVE / REJECT)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "event": "messageReceived",
+        "simple": true,
+        "maxResults": 10,
+        "filters": {
+          "q": "(subject:\"Approval needed\" OR subject:\"Decision conflict\") -label:SIS-Processed",
+          "readStatus": "both",
+          "includeSpamTrash": false,
+          "includeDrafts": false,
+          "labelIds": [],
+          "sender": ""
+        },
+        "options": {}
+      },
+      "id": "gmail-reply-trigger",
+      "name": "Approval Reply (Gmail Trigger)",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -240,
+        -120
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "sUk27B0Jfh99nfgy",
+          "name": "Gmail account"
+        }
+      },
+      "webhookId": "ec3eca0a-1e24-5dba-be98-1c7d87f915a8"
+    },
+    {
+      "parameters": {},
+      "id": "backfill-start",
+      "name": "Backfill Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 100,
+        "simple": true,
+        "filters": {
+          "q": "(subject:\"Approval needed\" OR subject:\"Decision conflict\") -label:SIS-Processed",
+          "includeSpamTrash": false,
+          "labelIds": []
+        },
+        "options": {}
+      },
+      "id": "backfill-find-replies",
+      "name": "Backfill: Find Replies",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -240,
+        240
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "sUk27B0Jfh99nfgy",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The backfill reads a page of old replies. Process them oldest first so the most\n// recent reply in the batch is the one the state machine sees last.\nconst items = $input.all();\nreturn items.slice().sort((a, b) => Number(a.json.internalDate || 0) - Number(b.json.internalDate || 0));"
+      },
+      "id": "backfill-sort",
+      "name": "Backfill: Oldest First",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "get",
+        "messageId": "={{ $json.id }}",
+        "simple": false,
+        "options": {}
+      },
+      "id": "get-full-message",
+      "name": "Get Full Message",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -20,
+        -120
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "sUk27B0Jfh99nfgy",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Exceptions",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "read-exceptions",
+      "name": "Read Exceptions",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -20,
+        120
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "\n// State comes from the Exceptions tab, read once per run by \"Read Exceptions\".\n// The Sheet is the durable store: it survives restarts, n8n upgrades and the JS\n// task runner (workflow static data does not survive the runner).\nconst stateItems = $input.all().map((i) => i.json).filter((j) => j && j.intake_id);\nconst state = {};\nfor (const row of stateItems) {\n  const key = String(row.intake_id || '').trim();\n  if (key) state[key] = row;\n}\nconst ADMIN = String('owner@example.com').toLowerCase();\n\nfunction unique(list) {\n  const seen = new Set();\n  const out = [];\n  for (const x of list) {\n    const v = String(x || '').trim().toLowerCase();\n    if (v && !seen.has(v)) { seen.add(v); out.push(v); }\n  }\n  return out;\n}\n\nconst messages = $('Get Full Message').all().map((i) => i.json).filter((j) => j && j.id);\nconst out = [];\n\nfor (let i = 0; i < messages.length; i++) {\n  const item = messages[i];\n  const headers = item.headers || {};\n  const subject = String(item.subject || item.Subject || headers.subject || headers.Subject || '')\n    .replace(/^Subject:\\s*/i, '');\n\n  let body = String(item.text || item.textAsHtml || item.snippet || '');\n  body = body.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ');\n\n  // Drop the quoted original so a quoted APPROVE cannot count as a decision.\n  const fresh = [];\n  for (const line of body.split(/\\r?\\n/)) {\n    if (/^\\s*>/.test(line)) break;\n    if (/^\\s*On .+wrote:\\s*$/i.test(line)) break;\n    if (/^\\s*-{2,}\\s*Original Message\\s*-{2,}/i.test(line)) break;\n    if (/^\\s*From:\\s+/i.test(line)) break;\n    fresh.push(line);\n  }\n  const replyText = fresh.join('\\n').trim();\n  const head = replyText.split('\\n').map((l) => l.trim()).filter(Boolean).slice(0, 4).join(' ');\n\n  const isReply = /^\\s*re\\s*:/i.test(subject);\n  const decisionMatch = isReply ? head.match(/\\b(APPROVE|APPROVED|REJECT|REJECTED)\\b/i) : null;\n  const decision = decisionMatch ? decisionMatch[1].toUpperCase().replace(/D$/, '') : '';\n  const overrideMatch = isReply ? head.match(/\\bOVERRIDE\\b[^A-Za-z]*(APPROVE|APPROVED|REJECT|REJECTED)\\b/i) : null;\n  const overrideDecision = overrideMatch ? overrideMatch[1].toUpperCase().replace(/D$/, '') : '';\n  const effective = overrideDecision || decision;\n\n  const intakeMatch = (subject + '\\n' + body).match(/INTAKE-[A-Z0-9]+/);\n  const intakeId = intakeMatch ? intakeMatch[0] : '';\n\n  const senderList = (item.from && item.from.value) || [];\n  const responder = String(\n    (senderList[0] && (senderList[0].address || senderList[0].name))\n    || headers.from || item.from || ''\n  ).trim();\n  const responderKey = responder.toLowerCase();\n  const isAdmin = Boolean(responderKey) && responderKey === ADMIN;\n\n  const row = intakeId ? state[intakeId] : undefined;\n  const prior = row\n    ? {\n        status: String(row.approval_status || '').toUpperCase(),\n        decision: String(row.decision || '').toUpperCase(),\n        decided_by: String(row.decided_by || '').toLowerCase(),\n        at: String(row.decided_at || ''),\n        message_id: String(row.decision_message_id || ''),\n      }\n    : undefined;\n\n  let route = 'ignore';\n  if (isReply && intakeId) {\n    if (overrideDecision && isAdmin) {\n      route = 'admin_override';\n    } else if (!effective) {\n      route = 'ignore';\n    } else if (!prior || !prior.status) {\n      route = 'decide';\n    } else if (prior.status === 'CONFLICT') {\n      route = isAdmin ? 'admin_override' : 'conflict_locked';\n    } else if (prior.decided_by === responderKey) {\n      route = prior.decision === effective ? 'duplicate' : 'change';\n    } else if (prior.decision === effective) {\n      route = 'agree';\n    } else {\n      route = 'conflict';\n    }\n  }\n\n  const now = new Date().toISOString();\n  const messageId = String(item.id || '');\n  const vendor = (row && row.vendor) || '';\n  const amount = row && row.amount !== undefined ? row.amount : '';\n  const noticeTo = unique([prior && prior.decided_by, responderKey, ADMIN]).join(', ');\n  const shottyApprovalId = row ? String(row.shotty_approval_id || '') : '';\n\n  out.push({\n    pairedItem: { item: i },\n    json: {\n      route,\n      intake_id: intakeId,\n      decision: effective,\n      responder,\n      responder_key: responderKey,\n      is_admin: isAdmin,\n      reply_subject: subject,\n      subject: subject,\n      message_id: messageId,\n      decided_at: now,\n      shotty_approval_id: shottyApprovalId,\n      override_note: overrideDecision ? head.replace(/\\s+/g, ' ').slice(0, 200) : '',\n      prior_decision: prior ? prior.decision : '',\n      prior_by: prior ? prior.decided_by : '',\n      prior_at: prior ? prior.at : '',\n      prior_message: prior ? prior.message_id : '',\n      prior_status: prior ? prior.status : '',\n      notice_to: noticeTo,\n      // Exceptions columns (names must match the header row)\n      approval_status: route === 'conflict' || route === 'conflict_locked' ? 'CONFLICT' : effective,\n      decided_by: responderKey,\n      decision_message_id: messageId,\n      // Decisions columns\n      vendor,\n      amount,\n      status: route,\n      message_id_log: messageId,\n    },\n  });\n}\n\nreturn out;\n"
+      },
+      "id": "parse-decision",
+      "name": "Parse Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "if-conflict-0",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "conflict",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "if-conflict-1",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "conflict_locked",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-conflict",
+      "name": "Conflict?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        420,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "if-override-0",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "admin_override",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-override",
+      "name": "Admin override?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        640,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "if-write-0",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "decide",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "if-write-1",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "change",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-write",
+      "name": "Write decision?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        860,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "if-log-only-0",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "duplicate",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "if-log-only-1",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "agree",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-log-only",
+      "name": "Log only?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1080,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Exceptions",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "intake_id"
+          ],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        },
+        "columnToMatchOn": "intake_id",
+        "valueToMatchOn": "={{ $json.intake_id }}"
+      },
+      "id": "sheet-update-exception",
+      "name": "Sheet: Update Exception",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        860,
+        -320
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Decisions",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-decision-log",
+      "name": "Sheet: Decision Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1080,
+        -320
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "if-conflict-email-0",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "conflict",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "if-conflict-email-1",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "conflict_locked",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-conflict-email",
+      "name": "Send conflict notice?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1520,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "if-override-email-0",
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "admin_override",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "if-override-email",
+      "name": "Send override notice?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1740,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.notice_to }}",
+        "subject": "=Decision conflict: {{ $json.vendor || 'invoice' }} {{ $json.amount || '' }} — admin decision needed",
+        "emailType": "text",
+        "message": "=Two people answered this invoice differently. Nothing has been filed.\n\nVendor:    {{ $json.vendor }}\nAmount:    {{ $json.amount }}\nReference: {{ $json.intake_id }}\n\nFirst decision:  {{ $json.prior_decision }} by {{ $json.prior_by }} ({{ $json.prior_at }})\nNew decision:    {{ $json.decision }} by {{ $json.responder }} ({{ $json.decided_at }})\n\nADMIN: reply to this email with\n  OVERRIDE APPROVE   or   OVERRIDE REJECT\nand a one-line reason. The invoice stays on hold until that reply arrives.\n\n-- SIS Invoice Approval Gate",
+        "options": {}
+      },
+      "id": "gmail-conflict-notice",
+      "name": "Email: Conflict Notice",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1740,
+        -480
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "sUk27B0Jfh99nfgy",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.notice_to }}",
+        "subject": "=Conflict resolved: {{ $json.vendor || 'invoice' }} → {{ $json.decision }}",
+        "emailType": "text",
+        "message": "=The admin has decided the conflicting invoice.\n\nVendor:         {{ $json.vendor }}\nAmount:         {{ $json.amount }}\nReference:      {{ $json.intake_id }}\nFinal decision: {{ $json.decision }} (set by {{ $json.responder }}, the admin)\nReason given:   {{ $json.override_note || 'not stated' }}\n\nThe ledger has been updated. Both earlier replies are kept in the decision log.\n\n-- SIS Invoice Approval Gate",
+        "options": {}
+      },
+      "id": "gmail-override-confirmation",
+      "name": "Email: Override Confirmation",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1960,
+        -480
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "sUk27B0Jfh99nfgy",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.message_id }}",
+        "labelIds": [
+          "Label_1"
+        ]
+      },
+      "id": "gmail-mark-processed",
+      "name": "Gmail: Mark Processed",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2180,
+        -320
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "sUk27B0Jfh99nfgy",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a1b2c3d4-0000-4000-8000-000000000021",
+              "leftValue": "={{ $json.shotty_approval_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "a1b2c3d4-0000-4000-8000-000000000022",
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000023",
+      "name": "Has Shotty approval?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        420,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8787/approve",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-bridge-token",
+              "value": "REPLACE_WITH_BRIDGE_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ id: $json.shotty_approval_id, decision: String($json.decision).toLowerCase(), suppress_callback: true }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000024",
+      "name": "Tell Shotty (reconcile)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        20
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Recover the parsed decision (the HTTP node replaces its input with the response) and\nconst parsed = $('Parse Decision').first().json;\nconst res = $input.first().json;\nconst unreachable = !res || (res.error && !res.status);\nconst status = unreachable ? 'unreachable' : String(res.status ?? 'unknown');\n// Only a first-decision reply that hits an existing decision is a no-op. Conflict/agree\n// routes must still run their own n8n handling.\nconst duplicate = status === 'duplicate' && parsed.route === 'decide';\nreturn [{\n  json: {\n    ...parsed,\n    shotty_status: status,\n    shotty_duplicate: duplicate,\n    shotty_previous: res.previous ?? null,\n    shotty_error: unreachable ? (res.error ?? 'unreachable') : null,\n  },\n}];"
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000025",
+      "name": "Shotty Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a1b2c3d4-0000-4000-8000-000000000026",
+              "leftValue": "={{ $json.shotty_duplicate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000027",
+      "name": "Already decided on phone?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1080,
+        20
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0000-4000-8000-000000000028",
+      "name": "No-op (already decided)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        120
+      ]
+    }
+  ],
+  "connections": {
+    "Approval Reply (Gmail Trigger)": {
+      "main": [
+        [
+          {
+            "node": "Get Full Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backfill Start": {
+      "main": [
+        [
+          {
+            "node": "Backfill: Find Replies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backfill: Find Replies": {
+      "main": [
+        [
+          {
+            "node": "Backfill: Oldest First",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backfill: Oldest First": {
+      "main": [
+        [
+          {
+            "node": "Get Full Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full Message": {
+      "main": [
+        [
+          {
+            "node": "Read Exceptions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Exceptions": {
+      "main": [
+        [
+          {
+            "node": "Parse Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Decision": {
+      "main": [
+        [
+          {
+            "node": "Has Shotty approval?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conflict?": {
+      "main": [
+        [
+          {
+            "node": "Sheet: Update Exception",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Admin override?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Admin override?": {
+      "main": [
+        [
+          {
+            "node": "Sheet: Update Exception",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Write decision?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write decision?": {
+      "main": [
+        [
+          {
+            "node": "Sheet: Update Exception",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log only?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log only?": {
+      "main": [
+        [
+          {
+            "node": "Sheet: Decision Log",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail: Mark Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheet: Update Exception": {
+      "main": [
+        [
+          {
+            "node": "Sheet: Decision Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheet: Decision Log": {
+      "main": [
+        [
+          {
+            "node": "Send conflict notice?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send conflict notice?": {
+      "main": [
+        [
+          {
+            "node": "Email: Conflict Notice",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Gmail: Mark Processed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send override notice?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send override notice?": {
+      "main": [
+        [
+          {
+            "node": "Email: Override Confirmation",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Gmail: Mark Processed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail: Mark Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Shotty approval?": {
+      "main": [
+        [
+          {
+            "node": "Tell Shotty (reconcile)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Conflict?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tell Shotty (reconcile)": {
+      "main": [
+        [
+          {
+            "node": "Shotty Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shotty Answer": {
+      "main": [
+        [
+          {
+            "node": "Already decided on phone?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already decided on phone?": {
+      "main": [
+        [
+          {
+            "node": "No-op (already decided)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Conflict?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No-op (already decided)": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Mark Processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

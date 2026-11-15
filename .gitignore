@@ -1,0 +1,8 @@
+# runtime state: the token and the owner's data live here, never in the repository
+state/
+node_modules/
+.DS_Store
+.env
+*.log
+__pycache__/
+n8n_demo/credentials/

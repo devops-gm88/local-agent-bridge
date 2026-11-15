@@ -1,0 +1,4 @@
+{
+  "_readme": "What the agent reads. Relative paths resolve from WORKSPACE_ROOT (default: the parent of this repository). Absolute paths are allowed. Restart after editing.",
+  "roots": ["WORKING_KNOWLEDGE.md", "CURRENT_STATE.md"]
+}

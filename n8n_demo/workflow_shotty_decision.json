@@ -1,0 +1,269 @@
+{
+  "id": "shotty-decision-webhook",
+  "name": "Shotty decision webhook",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "shotty-decision",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000003",
+      "name": "Shotty decision",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        160
+      ],
+      "webhookId": "shotty-decision"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The webhook body is Shotty's callback payload (see bridge/approvals.js).\nconst p = ($json && $json.body && typeof $json.body === 'object') ? $json.body : $json;\nconst problems = [];\nconst id = String(p.id ?? '');\nconst decision = String(p.decision ?? '').toLowerCase();\nif (!id) problems.push('missing approval id');\nif (!['approve', 'reject'].includes(decision)) problems.push('decision must be approve|reject');\nconst filed = p.result && typeof p.result === 'object' && p.result.filed ? p.result.filed : null;\nreturn [{\n  json: {\n    approval_id: id,\n    run_id: p.run_id ?? '',\n    tool: p.tool ?? '',\n    decision,\n    executed: p.executed === true,\n    decided_at: p.decided_at ?? new Date().toISOString(),\n    queue: decision === 'approve' ? 'approved_override' : 'rejected',\n    intake_id: p.run_id ?? '',\n    vendor: filed ? filed.vendor : '',\n    amount: filed ? filed.amount : null,\n    currency: filed ? filed.currency : '',\n    category: filed ? filed.category : '',\n    approved_limit: filed ? filed.approved_limit : null,\n    policy_override: filed ? filed.policy_override === true : false,\n    override_reason: filed ? filed.override_reason : '',\n    reason: filed && Array.isArray(filed.policy_reasons) ? filed.policy_reasons.join('; ') : '',\n    problems,\n    ok: problems.length === 0,\n  },\n}];"
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000004",
+      "name": "Normalise Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a1b2c3d4-0000-4000-8000-000000000005",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000006",
+      "name": "Valid decision?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        180,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a1b2c3d4-0000-4000-8000-000000000007",
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000008",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Approved",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000011",
+      "name": "Sheet: Approved",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        640,
+        40
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Decisions",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000012",
+      "name": "Sheet: Decision Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        640,
+        280
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0000-4000-8000-000000000009",
+      "name": "Ignore invalid decision",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        400,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Shotty decision": {
+      "main": [
+        [
+          {
+            "node": "Normalise Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Decision": {
+      "main": [
+        [
+          {
+            "node": "Valid decision?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid decision?": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore invalid decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Sheet: Approved",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sheet: Decision Log",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sheet: Decision Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {},
+  "tags": []
+}

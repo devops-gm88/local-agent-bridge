@@ -1,0 +1,487 @@
+{
+  "name": "Verified research pipeline (demo)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Research brief",
+        "formDescription": "One batch of contacts to source, verify and file. The pipeline fills a batch, checks every row against the rules, and sends anything unverifiable to a person.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Topic",
+              "fieldName": "topic",
+              "fieldType": "text",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Batch size",
+              "fieldName": "requested",
+              "fieldType": "number",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Minimum source quality",
+              "fieldName": "source_quality",
+              "fieldType": "text",
+              "requiredField": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "form-trigger",
+      "name": "Research Brief",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -900,
+        -200
+      ],
+      "webhookId": "a11f0c4e-2f6e-5b7e-9c1d-6f5a3b2c9d10"
+    },
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Run Demo Batch",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst j = $json || {};\nconst requested = Number(j.requested || j['Batch size'] || 60);\nreturn [{\n  json: {\n    batch_id: j.batch_id || 'RB-' + String(Date.now()).slice(-6),\n    topic: j.topic || j.Topic || 'Industrial suppliers in Ontario',\n    requested: requested > 0 ? requested : 60,\n    source_quality: j.source_quality || j['Minimum source quality'] || 'company website, dated in the last 90 days',\n    started_at: new Date().toISOString(),\n    status: 'received',\n  },\n}];\n"
+      },
+      "id": "prepare",
+      "name": "Prepare Batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -660,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1cM6rEk_TAMOhOQAWfkqL2AcvYQSy7nIQ8yxSVHArpMQ",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Batches",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-batches",
+      "name": "Append Batch",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -420,
+        -200
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Deterministic seed: 52 clean rows plus 8 deliberate defects, all stamped with this batch id.\nconst batch = $('Prepare Batch').first().json.batch_id;\nconst CLEAN = 52;\nconst CATS = ['manufacturing', 'logistics', 'retail', 'services', 'technology'];\nconst today = new Date().toISOString().slice(0, 10);\nconst rows = [];\nfor (let i = 1; i <= CLEAN; i++) {\n  const n = String(i).padStart(3, '0');\n  rows.push({\n    batch_id: batch,\n    id: 'R-' + n,\n    company: 'Rowan ' + CATS[i % CATS.length].replace(/^./, (c) => c.toUpperCase()) + ' ' + n,\n    contact_name: 'Alex Morgan',\n    email: 'alex.morgan@rowan' + n + '.co',\n    category: CATS[i % CATS.length],\n    source_url: 'https://rowan' + n + '.co/about',\n    source_date: today,\n  });\n}\nrows.push({ batch_id: batch, id: 'R-053', company: '', contact_name: 'Priya Shah', email: 'priya@example.com', category: 'retail', source_url: 'https://northline.co/team', source_date: today });\nrows.push({ batch_id: batch, id: 'R-054', company: 'Kestrel Fasteners', contact_name: 'Tom Reed', email: 'tom@kestrel.co', category: 'manufacturing', source_url: '', source_date: today });\nrows.push({ batch_id: batch, id: 'R-055', company: 'Halden Parts', contact_name: 'Ana Silva', email: 'ana@example.com', category: 'manufacturing', source_url: 'https://dead.example/team', source_date: today });\nrows.push({ batch_id: batch, id: 'R-056', company: 'Juniper Retail', contact_name: 'Mark Ellis', email: 'mark@example.com', category: 'retail', source_url: 'https://juniper.co/team', source_date: today });\nrows.push({ batch_id: batch, id: 'R-001', company: 'Rowan Manufacturing 001', contact_name: 'Alex Morgan', email: 'alex.morgan@example.com', category: 'manufacturing', source_url: 'https://rowan001.co/about', source_date: today });\nrows.push({ batch_id: batch, id: 'R-057', company: 'Baxter Logistics', contact_name: 'J', email: 'j@example.com', category: 'logistics', source_url: 'https://baxter.co/team', source_date: today });\nrows.push({ batch_id: batch, id: 'R-058', company: 'Onix Crypto', contact_name: 'Sara Lind', email: 'sara@example.com', category: 'crypto', source_url: 'https://onix.co/team', source_date: today });\nrows.push({ batch_id: batch, id: 'R-059', company: 'Pine Services', contact_name: 'Dan Wu', email: 'dan@example.com', category: 'services', source_url: 'https://pine.co/team', source_date: new Date(Date.now() - 150 * 864e5).toISOString().slice(0, 10) });\nreturn rows.map((r) => ({ json: r }));\n"
+      },
+      "id": "seed-rows",
+      "name": "Load Seed Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -420,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst REQUIRED = ['id', 'company', 'contact_name', 'email', 'category', 'source_url', 'source_date'];\nconst ALLOWED_CATEGORIES = ['manufacturing', 'logistics', 'retail', 'services', 'technology'];\nconst DEAD_DOMAINS = ['dead.example', 'placeholder.test', 'baddomain.invalid'];\nconst PLACEHOLDER_EMAILS = ['example.com', 'test.com', 'invalid.com'];\nconst STALE_DAYS = 90;\nconst domainOf = (url) => { const m = String(url || '').match(/^https?:\\/\\/([^\\/?#]+)/i); return m ? m[1].toLowerCase() : ''; };\nconst rows = $input.all().map((i) => i.json);\nconst seen = new Set();\nconst out = [];\nconst checked = new Date().toISOString();\nfor (const r of rows) {\n  const defects = [];\n  for (const f of REQUIRED) if (!String(r[f] === undefined || r[f] === null ? '' : r[f]).trim()) defects.push('missing_' + f);\n  const url = String(r.source_url || '');\n  if (url && !/^https?:\\/\\//i.test(url)) defects.push('invalid_url');\n  const domain = domainOf(url);\n  if (DEAD_DOMAINS.some((d) => domain === d || domain.endsWith('.' + d))) defects.push('dead_source');\n  const email = String(r.email || '').toLowerCase();\n  if (PLACEHOLDER_EMAILS.includes(email.split('@')[1] || '')) defects.push('placeholder_email');\n  const name = String(r.contact_name || '').trim();\n  if (name && !/^[A-Z][a-z]+ [A-Z][a-z]+$/.test(name)) defects.push('name_mismatch');\n  const category = String(r.category || '').trim();\n  if (category && !ALLOWED_CATEGORIES.includes(category)) defects.push('bad_category');\n  const date = new Date(r.source_date || 0);\n  if (!isNaN(date.getTime()) && Date.now() - date.getTime() > STALE_DAYS * 864e5) defects.push('stale_source');\n  const id = String(r.id || '').trim();\n  if (seen.has(id)) defects.push('duplicate_id');\n  else seen.add(id);\n  out.push({ json: { ...r, status: defects.length ? 'exception' : 'verified', defects, checked_at: checked } });\n}\nreturn out;\n"
+      },
+      "id": "gate",
+      "name": "Verification Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn $input.all().filter((i) => i.json.status === 'verified').map((i) => ({ json: i.json }));\n"
+      },
+      "id": "only-verified",
+      "name": "Only Verified",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn $input.all().filter((i) => i.json.status === 'exception').map((i) => ({\n  json: { ...i.json, defects: (i.json.defects || []).join('; ') },\n}));\n"
+      },
+      "id": "only-exceptions",
+      "name": "Only Exceptions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1cM6rEk_TAMOhOQAWfkqL2AcvYQSy7nIQ8yxSVHArpMQ",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Verified",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-verified",
+      "name": "Append Verified",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        300,
+        -80
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1cM6rEk_TAMOhOQAWfkqL2AcvYQSy7nIQ8yxSVHArpMQ",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Exceptions",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-exceptions",
+      "name": "Append Exceptions",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        300,
+        160
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// A pending decision row is still written for the audit trail; the phone approval id\n// lets the decision webhook append the signed outcome against the same exception.\nconst batch = $('Prepare Batch').first().json.batch_id;\nreturn $input.all().map((i) => ({\n  json: {\n    batch_id: batch,\n    exception_id: i.json.id,\n    decision: 'pending',\n    reviewer: '',\n    decided_at: '',\n    note: 'awaiting reviewer',\n    shotty_approval_id: i.json.shotty_approval_id || '',\n  },\n}));"
+      },
+      "id": "pending",
+      "name": "Pending Decisions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        300,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1cM6rEk_TAMOhOQAWfkqL2AcvYQSy7nIQ8yxSVHArpMQ",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Decisions",
+          "mode": "name"
+        },
+        "dataMode": "autoMapInputData",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "id": "sheet-decisions",
+      "name": "Append Decisions",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        540,
+        240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "FYX4XOBbniNIKU2w",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8787/api/approvals",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-bridge-token",
+              "value": "REPLACE_WITH_BRIDGE_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ run_id: 'research:' + $json.id, execute: false, title: 'Research row ' + $json.id + ' — ' + ($json.defects || 'exception'), actions: [ { id: 'approve', label: 'Approve' }, { id: 'replace', label: 'Replace' }, { id: 'drop', label: 'Drop' } ], fields: [ { label: 'Row', value: $json.id }, { label: 'Company', value: $json.company }, { label: 'Defects', value: $json.defects }, { label: 'Source', value: $json.source_url } ], payload: { exception_id: $json.id, batch_id: $('Prepare Batch').first().json.batch_id }, callback_url: 'http://127.0.0.1:5678/webhook/shotty-research-decision' }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000031",
+      "name": "Ask Shotty (research)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        300,
+        560
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Keep the exception row and attach the Shotty approval id.\nconst rows = $('Append Exceptions').all();\nconst responses = $input.all();\nreturn rows.map((row, i) => ({\n  json: {\n    ...row.json,\n    shotty_approval_id: responses[i] && responses[i].json ? responses[i].json.id : null,\n    shotty_status: responses[i] && responses[i].json ? responses[i].json.status : 'unknown',\n  },\n}));"
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000032",
+      "name": "Attach Research Approval",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        560
+      ]
+    }
+  ],
+  "connections": {
+    "Research Brief": {
+      "main": [
+        [
+          {
+            "node": "Prepare Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Demo Batch": {
+      "main": [
+        [
+          {
+            "node": "Prepare Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Batch": {
+      "main": [
+        [
+          {
+            "node": "Append Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Batch": {
+      "main": [
+        [
+          {
+            "node": "Load Seed Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Seed Rows": {
+      "main": [
+        [
+          {
+            "node": "Verification Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verification Gate": {
+      "main": [
+        [
+          {
+            "node": "Only Verified",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Only Exceptions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Verified": {
+      "main": [
+        [
+          {
+            "node": "Append Verified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Exceptions": {
+      "main": [
+        [
+          {
+            "node": "Append Exceptions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Exceptions": {
+      "main": [
+        [
+          {
+            "node": "Ask Shotty (research)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Decisions": {
+      "main": [
+        [
+          {
+            "node": "Append Decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Shotty (research)": {
+      "main": [
+        [
+          {
+            "node": "Attach Research Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Research Approval": {
+      "main": [
+        [
+          {
+            "node": "Pending Decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "dGPcBSOIMb7x9Vnm"
+  },
+  "id": "LhneA6p51Vzr51dg"
+}
