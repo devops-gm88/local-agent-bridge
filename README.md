@@ -1,5 +1,14 @@
 # Shotty — a local agent the owner controls from their phone (I1–I6 + I4b)
 
+
+A local agent on the owner's Mac, driven from their phone, where a write cannot execute without an approval.
+
+[![CI](https://github.com/devops-gm88/local-agent-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/devops-gm88/local-agent-bridge/actions/workflows/ci.yml) **134 tests: 133 pass, 0 fail, 1 skipped** in CI run [43725253764](https://github.com/devops-gm88/local-agent-bridge/actions/runs/43725253764) - measured: the approval gate refuses every write that does not carry the owner's decision
+
+```bash
+npm test
+```
+
 **What this proves:** a local model can drive real tools, a write cannot execute without the
 owner's approval from their phone, and every step is in an append-only log — on a machine that
 costs nothing per token.
